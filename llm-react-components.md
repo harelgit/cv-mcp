@@ -581,43 +581,293 @@ export default PersonalInfoForm;
 
 10. **Maintain a consistent component style**: Use similar interaction patterns across components to provide a unified user experience.
 
-## 9. Integration with Claude's Conversation Flow
+## 10. Content Editing Capabilities
 
-Since artifacts cannot directly communicate back to the chat, the MCP Resume Generator uses a specific conversation pattern:
+The MCP Resume Generator supports multiple approaches to content editing, balancing structured component-based input with flexible natural language editing.
 
-1. **Claude calls the appropriate MCP tool** to generate the next dialog component
-2. **Claude presents the component as an artifact** with instructions for the user
-3. **User interacts with the component** and clicks "Copy Choices" when done
-4. **User pastes the copied JSON** back into the conversation
-5. **Claude parses the JSON** and calls `submit_dialog_choices` with the data
-6. **Process repeats** for each section of the resume
+### 10.1 Component-Based Content Editing
 
-This creates a fluid experience where Claude guides the user through each step, interpreting their inputs and generating appropriate responses, while the React components provide structured data collection with rich interactions.
+For structured content editing through React components, specialized editing dialogs are created:
 
-Example conversation flow:
-
-```
-User: I need help creating a resume for a software engineering position.
-
-Claude: I'd be happy to help you create a professional resume for a software engineering role. Let's go through the process step by step. First, I'll need some basic information.
-
-[Claude calls start_resume_session MCP tool]
-
-Claude: Great! Let's start with your personal information. Please fill out the form below, then click "Copy Choices" and paste the result back here.
-
-[Claude displays personal information component as an artifact]
-
-User: {"name":"Alex Johnson","title":"Senior Software Engineer","email":"alex.johnson@example.com","phone":"555-123-4567","location":"San Francisco, CA","linkedin":"linkedin.com/in/alexjohnson","website":"alexjohnson.dev"}
-
-Claude: Thanks, Alex! Now let's create a professional summary that highlights your expertise. This is a crucial section that gives employers a quick overview of your qualifications and career highlights.
-
-[Claude calls submit_dialog_choices and then displays professional summary component]
-
-User: {"summary_text":"Senior Software Engineer with 8 years of experience building scalable web applications...","industry":"Technology","years_experience":8,"key_skills":["React","Node.js","AWS","Microservices"]}
-
-Claude: Excellent summary! Now let's add your work experience. Remember to focus on achievements rather than just responsibilities for maximum impact.
-
-[Conversation continues through all resume sections]
+```json
+// edit_work_experience.json prompt template
+{
+  "instructions": "Create a React component for editing an existing work experience entry. The component should receive the current work experience data as a prop and pre-populate all fields. Include company name, job title, location, dates, and achievements fields. Allow users to add, edit, and delete achievement bullets. Implement the same validation and enhancement features as the creation component. Most importantly, include the Copy Choices button that formats the edited data as JSON that matches the expected schema.",
+  
+  "user_instructions": "Edit your work experience information below. When finished, click 'Copy Choices' and paste the result back into our chat.",
+  
+  "examples": [
+    {
+      "description": "Example of a pre-populated work experience entry",
+      "current_data": {
+        "company": "Acme Corporation",
+        "title": "Senior Developer",
+        "location": "San Francisco, CA",
+        "startDate": "2019-03",
+        "endDate": "2023-01",
+        "achievements": [
+          "Increased application performance by 40% through code optimization",
+          "Led a team of 5 developers on the customer portal redesign",
+          "Implemented CI/CD pipeline reducing deployment time by 60%"
+        ]
+      }
+    }
+  ]
+}
 ```
 
-This structured yet conversational approach leverages the strengths of both Claude (natural language understanding, guidance, and contextual assistance) and React components (structured data collection, validation, and rich interactions).
+The component generation includes special consideration for editing functionality:
+
+```javascript
+// Example code snippet from generated edit component
+const EditWorkExperienceForm = ({ existingData }) => {
+  // Initialize state with existing data
+  const [formData, setFormData] = useState(existingData || {
+    company: "",
+    title: "",
+    location: "",
+    startDate: "",
+    endDate: "",
+    achievements: []
+  });
+  
+  // Include functions for adding/removing/reordering achievements
+  const addAchievement = () => {
+    setFormData({
+      ...formData,
+      achievements: [...formData.achievements, ""]
+    });
+  };
+  
+  const removeAchievement = (index) => {
+    const updatedAchievements = [...formData.achievements];
+    updatedAchievements.splice(index, 1);
+    setFormData({
+      ...formData, 
+      achievements: updatedAchievements
+    });
+  };
+  
+  // Rest of component implementation...
+}
+```
+
+### 10.2 Free-Form Editing via Chat
+
+The system also supports natural language editing through direct chat interaction, providing flexibility alongside structured components:
+
+```python
+async def handle_free_form_edit(session_id: str, section: str, edit_instructions: str):
+    """Process natural language edit instructions for a resume section."""
+    # Retrieve session data
+    session_data = json.loads(await session_store.get(f"session:{session_id}"))
+    
+    if not session_data:
+        return {"error": "Session not found"}
+    
+    # Extract current content for the specified section
+    current_content = session_data.get("user_data", {}).get(section, {})
+    
+    if not current_content:
+        return {"error": f"No existing content found for {section}"}
+    
+    # Use LLM to interpret edit instructions and modify content
+    client = anthropic.Client(api_key=os.getenv("CLAUDE_API_KEY"))
+    
+    edit_prompt = f"""
+    You are editing the {section} section of a resume.
+    
+    Current content:
+    ```json
+    {json.dumps(current_content, indent=2)}
+    ```
+    
+    User's edit instructions:
+    "{edit_instructions}"
+    
+    Apply these edits while maintaining the same JSON structure.
+    Return ONLY the edited JSON without any additional explanation.
+    """
+    
+    response = await client.messages.create(
+        model="claude-3-sonnet-20240229",
+        max_tokens=1500,
+        temperature=0.2,
+        system="You are a resume editing assistant. Follow the user's instructions precisely while maintaining the required JSON structure.",
+        messages=[
+            {"role": "user", "content": edit_prompt}
+        ]
+    )
+    
+    # Extract the edited content from the response
+    try:
+        edited_content = json.loads(response.content[0].text)
+        
+        # Update session with edited content
+        session_data["user_data"][section] = edited_content
+        await session_store.set(f"session:{session_id}", json.dumps(session_data))
+        
+        return {
+            "session_id": session_id,
+            "section": section,
+            "status": "updated",
+            "edited_content": edited_content
+        }
+    except json.JSONDecodeError as e:
+        return {"error": f"Failed to parse edited content: {str(e)}"}
+```
+
+### 10.3 Hybrid Editing Flow
+
+The MCP Resume Generator combines both editing approaches into a cohesive workflow:
+
+1. **Initial Creation**: Use structured components for initial data collection
+2. **Section Review**: Present a review component showing the current content
+3. **Edit Options**: Provide users with two editing paths:
+   - "Edit in Form": Generate a pre-populated React component for structured editing
+   - "Edit with Description": Allow natural language instructions for modifications
+
+Example conversation flow for free-form editing:
+
+```
+User: I'd like to edit my professional summary. It's too technical and needs to focus more on leadership.
+
+Claude: I'd be happy to help you edit your professional summary. I see two ways we can approach this:
+
+1. I can provide a form where you can directly edit the current content
+2. You can describe the changes you want, and I'll update it for you
+
+Which approach would you prefer?
+
+User: Let's use option 2. I want to emphasize my team leadership experience and mention my success with cross-functional collaboration.
+
+Claude: I'll update your professional summary to emphasize leadership and cross-functional collaboration. Here's what I have now:
+
+[Claude calls handle_free_form_edit and displays the result]
+
+Professional Summary:
+"Senior Software Engineer with 8 years of experience leading development teams and building scalable web applications. Proven track record of successful cross-functional collaboration, bringing together product, design, and engineering to deliver impactful solutions. Expertise in React, Node.js, AWS, and microservices architecture with a focus on mentoring junior developers and driving engineering excellence."
+
+Does this updated summary look good to you, or would you like to make further edits?
+```
+
+### 10.4 Rich Text Editing Components
+
+For longer content sections like the professional summary, the system supports rich text editing capabilities:
+
+```javascript
+// Example rich text editor component for professional summary
+import React, { useState, useEffect } from 'react';
+
+const RichTextEditor = ({ initialValue = "", onUpdate }) => {
+  const [content, setContent] = useState(initialValue);
+  const [wordCount, setWordCount] = useState(0);
+  const [showToolbar, setShowToolbar] = useState(false);
+
+  useEffect(() => {
+    const count = content.split(/\s+/).filter(Boolean).length;
+    setWordCount(count);
+    if (onUpdate) onUpdate(content);
+  }, [content, onUpdate]);
+
+  // Simple text formatting functions
+  const applyFormatting = (format) => {
+    const selection = window.getSelection();
+    if (selection.rangeCount === 0) return;
+
+    const range = selection.getRangeAt(0);
+    const selectedText = range.toString();
+    
+    if (!selectedText) return;
+    
+    let formattedText = selectedText;
+    
+    switch (format) {
+      case 'bold':
+        formattedText = `**${selectedText}**`;
+        break;
+      case 'italic':
+        formattedText = `*${selectedText}*`;
+        break;
+      case 'bullet':
+        formattedText = `\n• ${selectedText}`;
+        break;
+      default:
+        break;
+    }
+    
+    // Create a new DOM Range and replace the selected text
+    const newContent = content.substring(0, range.startOffset) + 
+                     formattedText + 
+                     content.substring(range.endOffset);
+    setContent(newContent);
+  };
+
+  return (
+    <div className="w-full border rounded-md">
+      {showToolbar && (
+        <div className="flex gap-2 p-2 border-b bg-gray-50">
+          <button 
+            onClick={() => applyFormatting('bold')}
+            className="p-1 rounded hover:bg-gray-200"
+            title="Bold"
+          >
+            <span className="font-bold">B</span>
+          </button>
+          <button 
+            onClick={() => applyFormatting('italic')}
+            className="p-1 rounded hover:bg-gray-200"
+            title="Italic"
+          >
+            <span className="italic">I</span>
+          </button>
+          <button 
+            onClick={() => applyFormatting('bullet')}
+            className="p-1 rounded hover:bg-gray-200"
+            title="Bullet Point"
+          >
+            • 
+          </button>
+        </div>
+      )}
+      <textarea
+        className="w-full p-3 min-h-[150px] focus:outline-none focus:ring-2 focus:ring-blue-500"
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+        onFocus={() => setShowToolbar(true)}
+        placeholder="Write your professional summary here..."
+      />
+      <div className="flex justify-between text-sm p-2 border-t bg-gray-50">
+        <span>{wordCount} words</span>
+        <span className="text-gray-500">
+          {content.length < 50 ? 'Too short' : 
+           content.length > 500 ? 'Too long' : 
+           'Good length'}
+        </span>
+      </div>
+    </div>
+  );
+};
+
+// Usage in the professional summary component
+const ProfessionalSummaryForm = () => {
+  const [summaryText, setSummaryText] = useState("");
+  
+  // Rest of component implementation...
+  
+  return (
+    <div className="max-w-2xl mx-auto p-6 bg-white rounded-lg shadow-md">
+      <h2 className="text-2xl font-bold text-gray-800 mb-4">Professional Summary</h2>
+      
+      <RichTextEditor
+        initialValue={summaryText}
+        onUpdate={setSummaryText}
+      />
+      
+      {/* Rest of the component */}
+    </div>
+  );
+};
+```
+
+This multi-faceted approach to content editing provides users with flexibility while maintaining the structure needed for consistent resume generation.
